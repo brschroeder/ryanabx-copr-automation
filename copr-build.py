@@ -19,6 +19,7 @@ REPOS = {
     "cosmic-monitor": "cosmic-monitor",
     "cosmic-notifications": "cosmic-notifications",
     "cosmic-osd": "cosmic-osd",
+    "cosmic-osk": "cosmic-osk",
     "cosmic-panel": "cosmic-panel",
     "cosmic-player": "cosmic-player",
     "cosmic-randr": "cosmic-randr",
