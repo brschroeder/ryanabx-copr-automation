@@ -62,6 +62,22 @@ HEADERS = {
 }
 
 
+def latest_succeeded_version(pkg: dict) -> str:
+    """
+    The source package version of a package's latest succeeded build,
+    or an empty string if the package has no succeeded build yet.
+    """
+    build = pkg.get("latest_succeeded_build") or {}
+    source = build.get("source_package") or {}
+    return source.get("version") or ""
+
+
+def latest_build_state(pkg: dict) -> str:
+    """The state of a package's latest build, or '' if it has never been built."""
+    build = pkg.get("latest_build") or {}
+    return build.get("state") or ""
+
+
 class Package:
     """
     Simple structure to represent a package from COSMIC
@@ -135,16 +151,20 @@ class Package:
             print(f"{self.package}: Nightly build is already running")
             return False
         if self.newest_commit != self.newest_nightly_commit:
+            old = self.newest_nightly_commit or "no build yet"
             print(
-                f"{self.package}: Commit {self.newest_commit} is newer than {self.newest_nightly_commit}. Needs nightly build."
+                f"{self.package}: Commit {self.newest_commit} is newer than "
+                f"{old}. Needs nightly build."
             )
             return True
         if self.newest_tag != self.newest_nightly_tag:
+            old = self.newest_nightly_tag or "no build yet"
             print(
-                f"{self.package}: Tag {self.newest_tag} is newer than {self.newest_nightly_tag}. Needs nightly build."
+                f"{self.package}: Tag {self.newest_tag} is newer than "
+                f"{old}. Needs nightly build."
             )
             return True
-        print(f"{self.package}: Build not needed")
+        print(f"{self.package}: Nightly build up to date")
         return False
 
     def should_build_tagged_package(self) -> bool:
@@ -160,8 +180,10 @@ class Package:
             print(f"{self.package}: Tagged build is already running")
             return False
         if self.newest_tag != self.newest_tagged_tag:
+            old = self.newest_tagged_tag or "no build yet"
             print(
-                f"{self.package}: Tag {self.newest_tag} is newer than {self.newest_tagged_tag}. Needs tagged build."
+                f"{self.package}: Tag {self.newest_tag} is newer than "
+                f"{old}. Needs tagged build."
             )
             return True
         return False
@@ -246,20 +268,16 @@ def main():
         )
         if tagged_pkg and pkg_name in REPOS.keys():
             print(f"Checking if {pkg_name} should build...")
+            nightly_version = latest_succeeded_version(pkg)
+            tagged_version = latest_succeeded_version(tagged_pkg)
             package = Package(
                 pkg_name,
                 REPOS[pkg_name],
-                parse_nightly_commit(
-                    pkg["latest_succeeded_build"]["source_package"]["version"]
-                ),
-                parse_nightly_tag(
-                    pkg["latest_succeeded_build"]["source_package"]["version"]
-                ),
-                parse_tagged_tag(
-                    tagged_pkg["latest_succeeded_build"]["source_package"]["version"]
-                ),
-                pkg["latest_build"]["state"],
-                tagged_pkg["latest_build"]["state"],
+                parse_nightly_commit(nightly_version),
+                parse_nightly_tag(nightly_version),
+                parse_tagged_tag(tagged_version),
+                latest_build_state(pkg),
+                latest_build_state(tagged_pkg),
             )
             if package.should_build_nightly_package():
                 nightly_builds.append(package.package)
