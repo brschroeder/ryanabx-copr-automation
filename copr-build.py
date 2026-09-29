@@ -3,6 +3,7 @@ import json
 import requests
 import os
 import time
+import sys
 
 REPOS = {
     "cosmic-app-library": "cosmic-applibrary",
@@ -41,6 +42,14 @@ TAGGED_COPR = "ryanabx/cosmic-epoch-tagged"
 
 GITHUB_API = "https://api.github.com"
 REQUEST_TIMEOUT = 30  # seconds, for GitHub API calls
+COPR_CLI_TIMEOUT = 60  # seconds, for copr-cli subprocesses
+BUILD_PACKAGE_TIMEOUT = "36000"  # COPR-side build timeout passed to copr-cli
+
+
+def die(message: str) -> None:
+    """Log an unrecoverable error and exit non-zero."""
+    print(f"ERROR: {message}", file=sys.stderr)
+    sys.exit(1)
 
 # Set up authentication for GitHub API and COPR API
 
@@ -87,6 +96,45 @@ def github_get(url: str, context: str):
     except ValueError as exc:
         print(f"WARNING: {context}: invalid JSON in response: {exc}")
         return None
+
+
+def list_copr_packages(copr: str) -> list[dict]:
+    """List the packages of a copr, including their latest builds."""
+    cmd = [
+        "copr-cli",
+        "list-packages",
+        "--with-latest-build",
+        "--with-latest-succeeded-build",
+        "--output-format",
+        "json",
+        copr,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=COPR_CLI_TIMEOUT
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"could not run copr-cli for {copr}: {exc}")
+    if result.returncode != 0:
+        die(
+            f"copr-cli list-packages failed for {copr} "
+            f"(exit {result.returncode}):\n"
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    raw = result.stdout.strip()
+    if not raw:
+        print(f"WARNING: copr-cli returned no packages for {copr}")
+        return []
+    try:
+        packages = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        die(f"could not parse package list for {copr}: {exc}")
+    if not isinstance(packages, list):
+        die(
+            f"unexpected package list format for {copr}: "
+            f"expected a list, got {type(packages).__name__}"
+        )
+    return packages
 
 
 def latest_succeeded_version(pkg: dict) -> str:
@@ -297,88 +345,103 @@ def parse_nightly_commit(full_string: str, package: str = "") -> str:
     ]  # 9973b03
 
 
-def main():
-    # First, we list packages in the coprs
-    copr_packages = json.loads(
-        subprocess.run(
-            [
-                "copr-cli",
-                "list-packages",
-                "--with-latest-build",
-                "--with-latest-succeeded-build",
-                "--output-format",
-                "json",
-                NIGHTLY_COPR,
-            ],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    )
+def queue_builds(builds: list[str], copr: str) -> int:
+    """
+    Queue the given builds in the given copr.
+    Returns the number of builds that failed to queue.
+    """
+    if not builds:
+        return 0
+    failures = 0
+    for name in builds:
+        cmd = [
+            "copr-cli",
+            "build-package",
+            "--timeout",
+            BUILD_PACKAGE_TIMEOUT,
+            "--name",
+            name,
+            copr,
+        ]
+        try:
+            # build-package keeps watching the build until it finishes.
+            # The local timeout is how we get out of the command once the
+            # build is queued: a TimeoutExpired is expected and is not a
+            # failure.
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10
+            )
+        except subprocess.TimeoutExpired:
+            print(f"Queued {name} in {copr}")
+            continue
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"ERROR: failed to queue {name} in {copr}: {exc}")
+            failures += 1
+            continue
+        if result.returncode != 0:
+            print(
+                f"ERROR: failed to queue {name} in {copr} "
+                f"(exit {result.returncode}):\n"
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            failures += 1
+        else:
+            print(f"Queued {name} in {copr}")
+    return failures
 
-    copr_nightly_packages = json.loads(
-        subprocess.run(
-            [
-                "copr-cli",
-                "list-packages",
-                "--with-latest-build",
-                "--with-latest-succeeded-build",
-                "--output-format",
-                "json",
-                TAGGED_COPR,
-            ],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    )
+
+def main() -> int:
+    # First, we list packages in the coprs
+    nightly_packages = list_copr_packages(NIGHTLY_COPR)
+    tagged_packages = list_copr_packages(TAGGED_COPR)
+    tagged_by_name = {
+        pkg["name"]: pkg for pkg in tagged_packages if pkg.get("name")
+    }
 
     nightly_builds: list[str] = []
     tagged_builds: list[str] = []
 
-    for pkg in copr_packages:
-        pkg_name = pkg["name"]
-        tagged_pkg = next(
-            (item for item in copr_nightly_packages if item["name"] == pkg_name), None
+    for pkg in nightly_packages:
+        pkg_name = pkg.get("name")
+        if not pkg_name:
+            print(f"WARNING: ignoring package entry without a name: {pkg!r}")
+            continue
+        tagged_pkg = tagged_by_name.get(pkg_name)
+        if tagged_pkg is None:
+            print(f"Skipping {pkg_name} (not present in the tagged copr)")
+            continue
+        if pkg_name not in REPOS:
+            print(f"Skipping {pkg_name} (no known upstream repo)")
+            continue
+
+        print(f"Checking if {pkg_name} should build...")
+        nightly_version = latest_succeeded_version(pkg)
+        tagged_version = latest_succeeded_version(tagged_pkg)
+        package = Package(
+            pkg_name,
+            REPOS[pkg_name],
+            parse_nightly_commit(nightly_version, pkg_name),
+            parse_nightly_tag(nightly_version),
+            parse_tagged_tag(tagged_version, pkg_name),
+            latest_build_state(pkg),
+            latest_build_state(tagged_pkg),
         )
-        if tagged_pkg and pkg_name in REPOS.keys():
-            print(f"Checking if {pkg_name} should build...")
-            nightly_version = latest_succeeded_version(pkg)
-            tagged_version = latest_succeeded_version(tagged_pkg)
-            package = Package(
-                pkg_name,
-                REPOS[pkg_name],
-                parse_nightly_commit(nightly_version, pkg_name),
-                parse_nightly_tag(nightly_version),
-                parse_tagged_tag(tagged_version, pkg_name),
-                latest_build_state(pkg),
-                latest_build_state(tagged_pkg),
-            )
-            if package.should_build_nightly_package():
-                nightly_builds.append(package.package)
-            if package.should_build_tagged_package():
-                tagged_builds.append(package.package)
-            time.sleep(5)
-        else:
-            print(f"Skipping {pkg_name}")
+        if package.should_build_nightly_package():
+            nightly_builds.append(package.package)
+        if package.should_build_tagged_package():
+            tagged_builds.append(package.package)
+        time.sleep(5)
 
     print(f"Queueing builds:\n\nNightly:\n{nightly_builds}\n\nTagged:\n{tagged_builds}")
 
-    for i in nightly_builds:
-        try:
-            subprocess.run(
-                ["copr-cli", "build-package", "--timeout", "36000", "--name", i, NIGHTLY_COPR],
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            pass
-    for i in tagged_builds:
-        try:
-            subprocess.run(
-                ["copr-cli", "build-package", "--timeout", "36000", "--name", i, TAGGED_COPR],
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            pass
+    failures = queue_builds(nightly_builds, NIGHTLY_COPR)
+    failures += queue_builds(tagged_builds, TAGGED_COPR)
+    if failures:
+        print(f"ERROR: {failures} build(s) failed to queue")
+        return 1
+    print("Done: all requested builds were queued successfully")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
