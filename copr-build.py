@@ -189,10 +189,20 @@ class Package:
         return False
 
 
-def parse_tagged_tag(full_string: str) -> str:
+def parse_tagged_tag(full_string: str, package: str = "") -> str:
     """
-    Get the tag from a tagged copr version string
+    Get the tag from a tagged copr version string, or '' if the string
+    is empty or does not look like a version.
     """
+    if not full_string:
+        return ""
+    if "-" not in full_string:
+        if package:
+            print(
+                f"WARNING: {package}: unexpected tagged version "
+                f"{full_string!r}; cannot extract tag"
+            )
+        return ""
     return full_string.rsplit("-", 1)[0].split(":", 1)[  # 1:1.0.8-1  # 1:1.0.8
         -1
     ]  # 1.0.8
@@ -200,8 +210,10 @@ def parse_tagged_tag(full_string: str) -> str:
 
 def parse_nightly_tag(full_string: str) -> str:
     """
-    Get the tag from a nightly copr version string
+    Get the tag from a nightly copr version string, or '' if empty.
     """
+    if not full_string:
+        return ""
     return full_string.split("^", 1)[  # 1:1.0.8^git20260323.9973b03-1
         0
     ].split(  # 1:1.0.8
@@ -211,10 +223,20 @@ def parse_nightly_tag(full_string: str) -> str:
     ]  # 1.0.8
 
 
-def parse_nightly_commit(full_string: str) -> str:
+def parse_nightly_commit(full_string: str, package: str = "") -> str:
     """
-    Get the commit from a nightly copr version string
+    Get the commit from a nightly copr version string, or '' if the
+    string is empty or does not contain a ^git commit marker.
     """
+    if not full_string:
+        return ""
+    if "^git" not in full_string:
+        if package:
+            print(
+                f"WARNING: {package}: unexpected nightly version "
+                f"{full_string!r}; cannot extract commit"
+            )
+        return ""
     return full_string.rsplit(".", 1)[  # 1:1.0.8^git20260323.9973b03-1
         -1
     ].split(  # 9973b03-1
@@ -273,9 +295,9 @@ def main():
             package = Package(
                 pkg_name,
                 REPOS[pkg_name],
-                parse_nightly_commit(nightly_version),
+                parse_nightly_commit(nightly_version, pkg_name),
                 parse_nightly_tag(nightly_version),
-                parse_tagged_tag(tagged_version),
+                parse_tagged_tag(tagged_version, pkg_name),
                 latest_build_state(pkg),
                 latest_build_state(tagged_pkg),
             )
