@@ -1,9 +1,25 @@
-import subprocess
+#!/usr/bin/env python3
+"""
+Keep the COSMIC nightly and tagged COPRs up to date.
+
+For every package in the nightly copr, this script checks the upstream
+(pop-os) repository for new commits and tags, and queues a build whenever
+the copr is out of date.  The tagged copr is only rebuilt when a new tag
+appears upstream.
+
+The script never crashes on missing builds, missing tags, or transient API
+errors: those situations are logged and the affected package is skipped or
+requeued on the next run.  It exits non-zero only if a build fails to
+queue, so CI can detect real failures.
+"""
+
 import json
-import requests
 import os
-import time
+import subprocess
 import sys
+import time
+
+import requests
 
 REPOS = {
     "cosmic-app-library": "cosmic-applibrary",
@@ -44,6 +60,7 @@ GITHUB_API = "https://api.github.com"
 REQUEST_TIMEOUT = 30  # seconds, for GitHub API calls
 COPR_CLI_TIMEOUT = 60  # seconds, for copr-cli subprocesses
 BUILD_PACKAGE_TIMEOUT = "36000"  # COPR-side build timeout passed to copr-cli
+RATE_LIMIT_DELAY = 5  # seconds between per-package GitHub API checks
 
 
 def die(message: str) -> None:
@@ -51,21 +68,8 @@ def die(message: str) -> None:
     print(f"ERROR: {message}", file=sys.stderr)
     sys.exit(1)
 
+
 # Set up authentication for GitHub API and COPR API
-
-COPR_CONFIG = os.environ.get("COPR_AUTH")
-if COPR_CONFIG:
-    # Get the path to ~/.config/copr
-    config_dir = os.path.expanduser("~/.config")
-    config_file = os.path.join(config_dir, "copr")
-
-    # Ensure the .config directory exists
-    os.makedirs(config_dir, exist_ok=True)
-    # Write content to the file
-    with open(config_file, "w") as file:
-        file.write(COPR_CONFIG)
-
-    print(f"Configuration written to {config_file}")
 
 TOKEN = os.environ.get("PAT_GITHUB")
 HEADERS = {"Accept": "application/vnd.github.v3+json"}
@@ -76,6 +80,23 @@ else:
         "WARNING: PAT_GITHUB is not set; GitHub API calls will be "
         "unauthenticated (rate limit: 60 requests/hour)"
     )
+
+
+def setup_copr_auth() -> None:
+    """Write the COPR client config from the COPR_AUTH environment variable."""
+    copr_auth = os.environ.get("COPR_AUTH")
+    if not copr_auth:
+        return
+    config_dir = os.path.expanduser("~/.config")
+    config_file = os.path.join(config_dir, "copr")
+    try:
+        os.makedirs(config_dir, exist_ok=True)
+        with open(config_file, "w") as file:
+            file.write(copr_auth)
+    except OSError as exc:
+        print(f"WARNING: could not write copr config to {config_file}: {exc}")
+        return
+    print(f"Configuration written to {config_file}")
 
 
 def github_get(url: str, context: str):
@@ -160,7 +181,7 @@ class Package:
 
     def __init__(
         self,
-        package: str,
+        name: str,
         upstream_repo_name: str,
         newest_nightly_commit: str,
         newest_nightly_tag: str,
@@ -168,7 +189,7 @@ class Package:
         nightly_build_status: str,
         tagged_build_status: str,
     ):
-        self.package = package
+        self.package = name
         self.upstream_repo_name = upstream_repo_name
         self.newest_nightly_commit = newest_nightly_commit
         self.newest_nightly_tag = newest_nightly_tag
@@ -238,7 +259,6 @@ class Package:
                 f"skipping nightly build"
             )
             return False
-
         if self.nightly_build_status == "pending":
             print(f"{self.package}: Nightly build is already pending")
             return False
@@ -391,6 +411,8 @@ def queue_builds(builds: list[str], copr: str) -> int:
 
 
 def main() -> int:
+    setup_copr_auth()
+
     # First, we list packages in the coprs
     nightly_packages = list_copr_packages(NIGHTLY_COPR)
     tagged_packages = list_copr_packages(TAGGED_COPR)
@@ -430,7 +452,7 @@ def main() -> int:
             nightly_builds.append(package.package)
         if package.should_build_tagged_package():
             tagged_builds.append(package.package)
-        time.sleep(5)
+        time.sleep(RATE_LIMIT_DELAY)
 
     print(f"Queueing builds:\n\nNightly:\n{nightly_builds}\n\nTagged:\n{tagged_builds}")
 
