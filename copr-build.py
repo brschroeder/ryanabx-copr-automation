@@ -39,6 +39,9 @@ REPOS = {
 NIGHTLY_COPR = "ryanabx/cosmic-epoch"
 TAGGED_COPR = "ryanabx/cosmic-epoch-tagged"
 
+GITHUB_API = "https://api.github.com"
+REQUEST_TIMEOUT = 30  # seconds, for GitHub API calls
+
 # Set up authentication for GitHub API and COPR API
 
 COPR_CONFIG = os.environ.get("COPR_AUTH")
@@ -56,10 +59,34 @@ if COPR_CONFIG:
     print(f"Configuration written to {config_file}")
 
 TOKEN = os.environ.get("PAT_GITHUB")
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github.v3+json",  # Use the GitHub API version
-}
+HEADERS = {"Accept": "application/vnd.github.v3+json"}
+if TOKEN:
+    HEADERS["Authorization"] = f"Bearer {TOKEN}"
+else:
+    print(
+        "WARNING: PAT_GITHUB is not set; GitHub API calls will be "
+        "unauthenticated (rate limit: 60 requests/hour)"
+    )
+
+
+def github_get(url: str, context: str):
+    """
+    GET a GitHub API endpoint, returning the parsed JSON or None on any
+    failure (network error, HTTP error, invalid JSON).
+    """
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        print(f"WARNING: {context}: request failed: {exc}")
+        return None
+    if response.status_code != 200:
+        print(f"WARNING: {context}: GitHub API returned HTTP {response.status_code}")
+        return None
+    try:
+        return response.json()
+    except ValueError as exc:
+        print(f"WARNING: {context}: invalid JSON in response: {exc}")
+        return None
 
 
 def latest_succeeded_version(pkg: dict) -> str:
@@ -106,34 +133,50 @@ class Package:
 
     def _get_latest_upstream_tag(self) -> str:
         """
-        Get the latest tag for the upstream repo
+        Get the latest tag for the upstream repo, or '' on any problem
         """
-        req = requests.get(
-            f"https://api.github.com/repos/pop-os/{self.upstream_repo_name}/tags",
-            headers=HEADERS,
+        data = github_get(
+            f"{GITHUB_API}/repos/pop-os/{self.upstream_repo_name}/tags",
+            f"latest tag for {self.package}",
         )
-        if req.status_code == 200:
-            json_data = req.json()
-            res: str = json_data[0]["name"].strip()
-            # Return the name with epoch- removed and with `-` replaced with `~`
-            return res.split("epoch-", 1)[1].replace("-", "~")
-        print(f"WARNING: Could not get latest tag for {self.package}")
-        return ""
+        if data is None:
+            return ""
+        if not isinstance(data, list) or not data:
+            print(f"WARNING: {self.package}: upstream repo has no tags")
+            return ""
+        tag = str(data[0].get("name", "")).strip()
+        if not tag:
+            print(f"WARNING: {self.package}: first tag entry has no name")
+            return ""
+        # Tags look like "epoch-1.0.8": strip the prefix, if present
+        if tag.startswith("epoch-"):
+            tag = tag.removeprefix("epoch-")
+        else:
+            print(
+                f"WARNING: {self.package}: tag {tag!r} does not start with "
+                f"'epoch-'; using it as-is"
+            )
+        # Return the name with `-` replaced with `~`
+        return tag.replace("-", "~")
 
     def _get_latest_upstream_commit(self) -> str:
         """
-        Get the latest commit for the upstream repo
+        Get the latest commit for the upstream repo, or '' on any problem
         """
-        req = requests.get(
-            f"https://api.github.com/repos/pop-os/{self.upstream_repo_name}/commits",
-            headers=HEADERS,
+        data = github_get(
+            f"{GITHUB_API}/repos/pop-os/{self.upstream_repo_name}/commits",
+            f"latest commit for {self.package}",
         )
-        if req.status_code == 200:
-            json_data = req.json()
-            git_sha = json_data[0]["sha"][0:7]
-            return git_sha
-        print(f"WARNING: Could not get latest commit for {self.package}")
-        return ""
+        if data is None:
+            return ""
+        if not isinstance(data, list) or not data:
+            print(f"WARNING: {self.package}: upstream repo has no commits")
+            return ""
+        git_sha = str(data[0].get("sha", ""))[0:7]
+        if not git_sha:
+            print(f"WARNING: {self.package}: could not extract commit sha")
+            return ""
+        return git_sha
 
     def should_build_nightly_package(self) -> bool:
         """
@@ -142,6 +185,10 @@ class Package:
         if (
             self.newest_commit == "" or self.newest_tag == ""
         ):  # There was a problem getting the newest commit or tag
+            print(
+                f"{self.package}: could not determine upstream state, "
+                f"skipping nightly build"
+            )
             return False
 
         if self.nightly_build_status == "pending":
@@ -172,6 +219,10 @@ class Package:
         `True` if should build tagged, `False` otherwise
         """
         if self.newest_tag == "":  # There was a problem getting the newest tag
+            print(
+                f"{self.package}: could not determine upstream tag, "
+                f"skipping tagged build"
+            )
             return False
         if self.tagged_build_status == "pending":
             print(f"{self.package}: Tagged build is already pending")
