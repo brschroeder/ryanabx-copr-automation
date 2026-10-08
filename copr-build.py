@@ -46,6 +46,7 @@ REPOS = {
     "cosmic-settings-daemon": "cosmic-settings-daemon",
     "cosmic-store": "cosmic-store",
     "cosmic-term": "cosmic-term",
+    "cosmic-viewer": "cosmic-viewer",
     "cosmic-wallpapers": "cosmic-wallpapers",
     "cosmic-workspaces": "cosmic-workspaces-epoch",
     "pop-launcher": "launcher",
